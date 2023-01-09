@@ -1,0 +1,156 @@
+#!/usr/bin/env ruby
+
+# Big thanks to @edjames for doing pretty much all of it.
+
+begin
+  require 'tty-prompt'
+  require 'tty-config'
+rescue LoadError => e
+  puts "Please install the 'tty-prompt' and 'tty-config' gem. Toodle-pip."
+  exit
+end
+
+class ForemanStart
+  CONFIG_FILE = '.foreman.lock'.freeze
+  CONFIG_EXTNAME = '.yml'.freeze
+
+  # https://github.com/piotrmurach/pastel#3-supported-colors
+  DEFAULT_COLORS = {
+    help: %i[green on_black dim],
+    procname: %i[white on_black bold],
+    proccommand: %i[bright_black on_black dim]
+  }.freeze
+
+  attr_reader :prompt, :processes, :config, :lnav
+
+  def run!
+    check_file!('Procfile')
+
+    @config = open_config
+    @lnav = config.fetch(:settings, :lnav)
+    @processes = parse_procfile
+    foreman_start
+  rescue TTY::Reader::InputInterrupt
+    quit
+  end
+
+  private
+
+  def check_file!(filename)
+    return if File.exist?(filename)
+    print "Cannot find file: #{filename}"
+    quit
+  end
+
+  def parse_procfile
+    lines = File.readlines('Procfile').map do |l|
+      line = l.split(':').map(&:strip)
+      next if line[0].nil? || line[0].empty? || line[0].start_with?('#')
+      line
+    end
+    Hash[ lines.compact.collect { |v| [v[0], v[1]] } ]
+  end
+
+  def foreman_start
+    options = { cycle: true, per_page: 15, echo: false, show_help: :always }
+    clear
+
+    @prompt = TTY::Prompt.new
+    prompt.on(:keypress) do |event|
+      if event.value == 'l'
+        toggle_lnav
+        restart
+      end
+    end
+
+    menu_items = processes.map do |name, command|
+      { key: name, name: name_decorate(name, command), value: name }
+    end
+
+    procs = prompt.multi_select(title, menu_items, options) do |menu|
+      menu.default(*default_keys) if default_keys.any?
+      menu.help prompt.decorate(help, *get_colors_for(:help))
+    end
+
+    update_config(procs)
+
+    quit if procs.empty?
+
+    command = "foreman start -m #{procs.join('=1,')}=1"
+    command << ' | lnav' if lnav
+
+    execute(command)
+    quit
+  end
+
+  def title
+    lnav_string = lnav ? ' (with piping to lnav)' : ''
+    title = "Select processes to run in current tab%s:" % lnav_string
+  end
+
+  def name_decorate(name, command)
+    procname = prompt.decorate(name, *get_colors_for(:procname))
+    proccommand = prompt.decorate(command, *get_colors_for(:proccommand))
+
+    "#{procname} #{proccommand}"
+  end
+
+  def help
+    "(Press ↑/↓ arrow to move, Space/Ctrl+A|R to select (all|rev), 'l' for lnav and Enter to finish)"
+  end
+
+  def update_config(selected_procs)
+    processes.keys.each do |key|
+      config.set(:procs, :default, key, :enabled, value: selected_procs.include?(key))
+    end
+
+    config.write(force: true)
+  end
+
+  def open_config
+    config = TTY::Config.new
+    config.append_path(Dir.pwd)
+    config.filename = CONFIG_FILE
+    config.extname = CONFIG_EXTNAME
+
+    return config unless config.exist?
+
+    config.read
+    config
+  end
+
+  def toggle_lnav
+    config.set(:settings, :lnav, value: !lnav)
+    config.write(force: true)
+  end
+
+  def restart
+    execute('ruby', __FILE__)
+  end
+
+  def default_keys
+    @default_keys ||= processes.map do |name, command|
+      name_decorate(name, command) if config.fetch(:procs, :default, name, :enabled)
+    end.compact
+  end
+
+  def get_colors_for(item)
+    config.fetch(:settings, :colors, item)&.map(&:to_sym) || DEFAULT_COLORS[item]
+  end
+
+  def clear
+    system 'clear'
+  end
+
+  def execute(command, opts = nil)
+    exec command, *opts
+  end
+
+  def quit
+    puts; puts; puts 'Toodle-oo.'; puts
+    exit 0
+  end
+
+end
+
+ForemanStart.new.run!
